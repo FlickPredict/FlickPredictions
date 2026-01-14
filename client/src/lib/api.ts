@@ -1,0 +1,219 @@
+const API_BASE = '/api';
+
+// Calculate Yes/No percentages that always sum to exactly 100%
+// Normalizes both prices proportionally when they don't sum to 1.0
+export function getBalancedPercentages(yesPrice: number, noPrice: number): { yesPercent: number; noPercent: number } {
+  const total = yesPrice + noPrice;
+  
+  // Guard against zero/near-zero/invalid totals to avoid NaN and misleading normalization
+  // Markets with very small totals (uninitialized, error states) get 50/50 fallback
+  if (!Number.isFinite(total) || total < 0.01) {
+    return { yesPercent: 50, noPercent: 50 };
+  }
+  
+  // If total is close to 1.0 (normal case), use direct calculation
+  if (Math.abs(total - 1.0) < 0.01) {
+    // Round yesPercent, calculate noPercent as complement
+    const yesPercent = Math.round(yesPrice * 100);
+    const noPercent = 100 - yesPercent;
+    return { yesPercent, noPercent };
+  }
+  
+  // Normalize proportionally when prices don't sum to 1.0
+  const normalizedYes = yesPrice / total;
+  const normalizedNo = noPrice / total;
+  
+  // Round to nearest, then adjust to sum to 100
+  let yesPercent = Math.round(normalizedYes * 100);
+  let noPercent = Math.round(normalizedNo * 100);
+  
+  // Ensure they sum to 100
+  const diff = yesPercent + noPercent - 100;
+  if (diff !== 0) {
+    // Adjust the larger value to maintain relative accuracy
+    if (yesPercent > noPercent) {
+      yesPercent -= diff;
+    } else {
+      noPercent -= diff;
+    }
+  }
+  
+  return { yesPercent, noPercent };
+}
+
+async function fetchWithAuth(url: string, options: RequestInit = {}, privyId?: string | null, accessToken?: string | null) {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options.headers as Record<string, string>),
+  };
+  
+  if (accessToken) {
+    headers['Authorization'] = `Bearer ${accessToken}`;
+  }
+  if (privyId) {
+    headers['x-privy-user-id'] = privyId;
+  }
+  
+  const response = await fetch(`${API_BASE}${url}`, {
+    ...options,
+    headers,
+  });
+  
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Request failed' }));
+    throw new Error(error.error || 'Request failed');
+  }
+  
+  return response.json();
+}
+
+export interface Market {
+  id: string;
+  title: string;
+  subtitle: string;
+  category: string;
+  yesPrice: number;
+  noPrice: number;
+  yesLabel: string;
+  noLabel: string;
+  volume: number;
+  volume24h?: number;
+  endDate: string;
+  status: string;
+  imageUrl?: string;
+  eventTicker?: string;
+  isInitialized?: boolean; // Whether market is ready for trading (no initialization fee required)
+}
+
+export interface MarketsResponse {
+  markets: Market[];
+  cacheTimestamp: number;
+  total: number;
+  hasMore: boolean;
+}
+
+export interface MarketsParams {
+  limit?: number;
+  offset?: number;
+  excludeIds?: string[];
+  category?: string;
+}
+
+export interface Trade {
+  id: string;
+  userId: string;
+  marketId: string;
+  marketTitle: string;
+  marketCategory: string | null;
+  direction: string;
+  wagerAmount: number;
+  price: string;
+  shares: string;
+  estimatedPayout: string;
+  isClosed: boolean;
+  closedAt: string | null;
+  pnl: string | null;
+  createdAt: string;
+}
+
+export interface User {
+  id: string;
+  privyId: string;
+  walletAddress: string | null;
+  yesWager: number;
+  noWager: number;
+  interests: string[];
+  createdAt: string;
+}
+
+export async function getMarkets(params?: MarketsParams): Promise<MarketsResponse> {
+  const searchParams = new URLSearchParams();
+  if (params?.category && params.category !== 'all') {
+    searchParams.set('category', params.category);
+  }
+  if (params?.limit !== undefined) {
+    searchParams.set('limit', params.limit.toString());
+  }
+  if (params?.offset !== undefined) {
+    searchParams.set('offset', params.offset.toString());
+  }
+  if (params?.excludeIds && params.excludeIds.length > 0) {
+    searchParams.set('excludeIds', params.excludeIds.join(','));
+  }
+  const queryString = searchParams.toString();
+  return fetchWithAuth(`/markets${queryString ? `?${queryString}` : ''}`);
+}
+
+export async function getEventMarkets(eventTicker: string): Promise<{ markets: Market[] }> {
+  return fetchWithAuth(`/events/${eventTicker}/markets`);
+}
+
+export async function searchMarkets(query: string): Promise<{ markets: Market[] }> {
+  return fetchWithAuth(`/markets/search?q=${encodeURIComponent(query)}`);
+}
+
+export async function createOrGetUser(privyId: string, walletAddress?: string | null): Promise<{ user: User }> {
+  return fetchWithAuth('/users', {
+    method: 'POST',
+    body: JSON.stringify({ privyId, walletAddress }),
+  });
+}
+
+export async function getMe(privyId: string): Promise<{ user: User }> {
+  return fetchWithAuth('/users/me', {}, privyId);
+}
+
+export async function updateSettings(
+  privyId: string, 
+  settings: { yesWager?: number; noWager?: number; interests?: string[] }
+): Promise<{ user: User }> {
+  return fetchWithAuth('/users/settings', {
+    method: 'PATCH',
+    body: JSON.stringify(settings),
+  }, privyId);
+}
+
+export async function createTrade(
+  privyId: string,
+  trade: {
+    marketId: string;
+    marketTitle: string;
+    marketCategory: string | null;
+    optionLabel?: string | null; // e.g., "Democratic Party" - what the user bet on
+    direction: 'YES' | 'NO';
+    wagerAmount: number;
+    price: number;
+    actualShares?: number; // Actual filled shares from async trade polling
+    signature?: string;
+    executionMode?: 'sync' | 'async';
+  }
+): Promise<{ trade: Trade }> {
+  return fetchWithAuth('/trades', {
+    method: 'POST',
+    body: JSON.stringify(trade),
+  }, privyId);
+}
+
+export async function getTrades(privyId: string): Promise<{ trades: Trade[] }> {
+  return fetchWithAuth('/trades', {}, privyId);
+}
+
+export async function getPositions(privyId: string): Promise<{ positions: Trade[] }> {
+  return fetchWithAuth('/positions', {}, privyId);
+}
+
+export async function closeTrade(privyId: string, tradeId: string, pnl: number): Promise<{ trade: Trade }> {
+  return fetchWithAuth(`/trades/${tradeId}/close`, {
+    method: 'POST',
+    body: JSON.stringify({ pnl }),
+  }, privyId);
+}
+
+export interface PriceHistory {
+  timestamp: number;
+  price: number;
+}
+
+export async function getMarketHistory(ticker: string): Promise<{ history: PriceHistory[] }> {
+  return fetchWithAuth(`/markets/${ticker}/history`);
+}
